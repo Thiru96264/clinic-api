@@ -1,0 +1,15 @@
+{
+  "name": "clinic-appointment-api-mongo",
+  "version": "1.0.0",
+  "description": "Doctor appointment booking REST API (MongoDB + Express): dynamic availability, book, cancel, reschedule",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.8.0"
+  }
+}
