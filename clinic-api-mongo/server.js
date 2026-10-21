@@ -263,6 +263,33 @@ app.put('/appointments/:id/reschedule', ah(async (req, res) => {
     throw e;
   }
 }));
+// ---------- NEW: bookings by doctor NAME (admin) ----------
+// GET /appointments-by-doctor?name=ramesh&date=YYYY-MM-DD&status=BOOKED&active=true
+app.get('/appointments-by-doctor', ah(async (req, res) => {
+  const { name, date, status, active } = req.query;
+  if (!name || !String(name).trim()) return fail(res, 400, 'INVALID_NAME', 'name venum (example: ramesh)');
+
+  const safe = String(name).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const docs = await Doctor.find({ name: new RegExp(safe, 'i') }).lean();
+  if (docs.length === 0) return fail(res, 404, 'DOCTOR_NOT_FOUND', 'Antha name la doctor kidaikala');
+
+  const q = { doctorId: { $in: docs.map((d) => d._id) } };
+  if (date) {
+    if (!isValidDate(date)) return fail(res, 400, 'INVALID_DATE', 'date YYYY-MM-DD format la venum');
+    q.date = date;
+  }
+  if (status) q.status = String(status).toUpperCase();
+  if (active === 'true') q.active = true; // cancelled varaadhu
+
+  const list = await Appointment.find(q).sort({ date: 1, slot: 1 }).limit(200).lean();
+  const appointments = await Promise.all(list.map(present));
+  res.json({
+    success: true,
+    doctors: docs.map((d) => ({ doctorId: d._id, name: d.name, specialization: d.specialization })),
+    count: appointments.length,
+    appointments,
+  });
+}));
 
 // ---------- 404 + error handler ----------
 app.use((req, res) => fail(res, 404, 'NOT_FOUND', 'Endpoint kidaikala'));
