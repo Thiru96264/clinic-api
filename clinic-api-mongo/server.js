@@ -172,6 +172,22 @@ app.post('/appointments', ah(async (req, res) => {
     throw e;
   }
 }));
+// ---------- List all (admin) ----------
+// GET /appointments?date=YYYY-MM-DD&doctorId=D101&status=BOOKED
+app.get('/appointments', ah(async (req, res) => {
+  const { date, doctorId, status } = req.query;
+  const q = {};
+  if (date) {
+    if (!isValidDate(date)) return fail(res, 400, 'INVALID_DATE', 'date YYYY-MM-DD format la venum');
+    q.date = date;
+  }
+  if (doctorId) q.doctorId = String(doctorId);
+  if (status) q.status = String(status).toUpperCase();
+
+  const list = await Appointment.find(q).sort({ date: 1, slot: 1 }).limit(200).lean();
+  const appointments = await Promise.all(list.map(present));
+  res.json({ success: true, count: appointments.length, appointments });
+}));
 
 // ---------- View ----------
 // GET /appointments/:id?phone=XXXXXXXXXX
