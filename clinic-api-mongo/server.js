@@ -49,6 +49,7 @@ async function present(a) {
     date: a.date,
     slot: a.slot,
     status: a.status,
+    source: a.source || 'chatbot',
   };
 }
 
@@ -134,7 +135,7 @@ app.get('/doctors/:id/slots', ah(async (req, res) => {
 // ---------- Book ----------
 // POST /appointments
 app.post('/appointments', ah(async (req, res) => {
-  const { doctorId, date, slot, patientName, phone, reason } = req.body || {};
+  const { doctorId, date, slot, patientName, phone, reason, source } = req.body || {};
 
   if (typeof doctorId !== 'string' || !(await doctorExists(doctorId)))
     return fail(res, 404, 'DOCTOR_NOT_FOUND', 'Doctor kidaikala');
@@ -160,6 +161,7 @@ app.post('/appointments', ah(async (req, res) => {
       slot,
       status: 'BOOKED',
       active: true,
+      source: ['chatbot', 'dashboard', 'phone'].includes(source) ? source : 'chatbot',
     });
     res.status(201).json({
       success: true,
@@ -171,22 +173,6 @@ app.post('/appointments', ah(async (req, res) => {
       return fail(res, 409, 'SLOT_UNAVAILABLE', 'Andha slot ippo thaan vera yaaro book pannitaanga. Vera slot select pannunga.');
     throw e;
   }
-}));
-// ---------- List all (admin) ----------
-// GET /appointments?date=YYYY-MM-DD&doctorId=D101&status=BOOKED
-app.get('/appointments', ah(async (req, res) => {
-  const { date, doctorId, status } = req.query;
-  const q = {};
-  if (date) {
-    if (!isValidDate(date)) return fail(res, 400, 'INVALID_DATE', 'date YYYY-MM-DD format la venum');
-    q.date = date;
-  }
-  if (doctorId) q.doctorId = String(doctorId);
-  if (status) q.status = String(status).toUpperCase();
-
-  const list = await Appointment.find(q).sort({ date: 1, slot: 1 }).limit(200).lean();
-  const appointments = await Promise.all(list.map(present));
-  res.json({ success: true, count: appointments.length, appointments });
 }));
 
 // ---------- View ----------
@@ -263,24 +249,44 @@ app.put('/appointments/:id/reschedule', ah(async (req, res) => {
     throw e;
   }
 }));
-// ---------- NEW: bookings by doctor NAME (admin) ----------
+
+
+// =====================================================================
+//  LIST + DASHBOARD ENDPOINTS (admin side, all need x-api-key if API_KEY is set)
+// =====================================================================
+
+// ---------- List all appointments (simple) ----------
+// GET /appointments?date=YYYY-MM-DD&doctorId=D101&status=BOOKED&active=true
+app.get('/appointments', ah(async (req, res) => {
+  const { date, doctorId, status, active } = req.query;
+  const q = {};
+  if (date) {
+    if (!isValidDate(date)) return fail(res, 400, 'INVALID_DATE', 'date YYYY-MM-DD format la venum');
+    q.date = date;
+  }
+  if (doctorId) q.doctorId = String(doctorId);
+  if (status) q.status = String(status).toUpperCase();
+  if (active === 'true') q.active = true;
+  const list = await Appointment.find(q).sort({ date: 1, slot: 1 }).limit(200).lean();
+  const appointments = await Promise.all(list.map(present));
+  res.json({ success: true, count: appointments.length, appointments });
+}));
+
+// ---------- Bookings by doctor NAME ----------
 // GET /appointments-by-doctor?name=ramesh&date=YYYY-MM-DD&status=BOOKED&active=true
 app.get('/appointments-by-doctor', ah(async (req, res) => {
   const { name, date, status, active } = req.query;
   if (!name || !String(name).trim()) return fail(res, 400, 'INVALID_NAME', 'name venum (example: ramesh)');
-
   const safe = String(name).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const docs = await Doctor.find({ name: new RegExp(safe, 'i') }).lean();
   if (docs.length === 0) return fail(res, 404, 'DOCTOR_NOT_FOUND', 'Antha name la doctor kidaikala');
-
   const q = { doctorId: { $in: docs.map((d) => d._id) } };
   if (date) {
     if (!isValidDate(date)) return fail(res, 400, 'INVALID_DATE', 'date YYYY-MM-DD format la venum');
     q.date = date;
   }
   if (status) q.status = String(status).toUpperCase();
-  if (active === 'true') q.active = true; // cancelled varaadhu
-
+  if (active === 'true') q.active = true;
   const list = await Appointment.find(q).sort({ date: 1, slot: 1 }).limit(200).lean();
   const appointments = await Promise.all(list.map(present));
   res.json({
@@ -288,6 +294,205 @@ app.get('/appointments-by-doctor', ah(async (req, res) => {
     doctors: docs.map((d) => ({ doctorId: d._id, name: d.name, specialization: d.specialization })),
     count: appointments.length,
     appointments,
+  });
+}));
+
+// ---------- All doctors (no date needed) ----------
+// GET /doctors
+app.get('/doctors', ah(async (req, res) => {
+  const docs = await Doctor.find().sort({ name: 1 }).lean();
+  res.json({
+    success: true,
+    count: docs.length,
+    doctors: docs.map((d) => ({
+      doctorId: d._id,
+      name: d.name,
+      specialization: d.specialization,
+      qualification: d.qualification,
+      experienceYears: d.experienceYears,
+      consultationFee: d.consultationFee,
+      isAvailable: d.isAvailable !== false,
+    })),
+  });
+}));
+
+// ---------- Dashboard helpers ----------
+const DEPT_ICONS = { Cardiology: '❤️', 'General Medicine': '🩺', Pediatrics: '🧒', Dermatology: '🧴' };
+
+// Dashboard status: Cancelled / Rescheduled / Completed (time over) / Confirmed (upcoming)
+function uiStatus(a) {
+  if (a.status === 'CANCELLED') return 'Cancelled';
+  if (msUntil(a.date, a.slot) < 0) return 'Completed';
+  return a.status === 'RESCHEDULED' ? 'Rescheduled' : 'Confirmed';
+}
+
+async function doctorMap() {
+  const docs = await Doctor.find().lean();
+  return new Map(docs.map((d) => [d._id, d]));
+}
+
+function adminRow(a, dm) {
+  const d = dm.get(a.doctorId);
+  return {
+    id: formatId(a.seq),
+    appointment_date: a.date,
+    appointment_time: a.slot,
+    status: uiStatus(a),
+    booking_source: a.source || 'chatbot',
+    notes: a.reason || null,
+    cancellation_reason: a.cancelReason || null,
+    created_at: a.createdAt ? new Date(a.createdAt).toISOString() : a.date + 'T00:00:00.000Z',
+    patient_id: a.phone,
+    doctor_id: a.doctorId,
+    department_id: d ? d.specialization : null,
+    patientsdetails: { full_name: a.patientName, phone: a.phone },
+    doctors: d ? { full_name: d.name } : null,
+    departments: d ? { name: d.specialization } : null,
+  };
+}
+
+// Patients are derived from appointments (phone number = patient key)
+function buildPatients(all) {
+  const byPhone = new Map();
+  const sorted = [...all].sort((x, y) => new Date(x.createdAt || 0) - new Date(y.createdAt || 0));
+  for (const a of sorted) {
+    const p = byPhone.get(a.phone) || {
+      id: a.phone, full_name: a.patientName, phone: a.phone, email: null, date_of_birth: null,
+      gender: null, blood_group: null, address: null, emergency_contact_name: null, emergency_contact_phone: null,
+      created_at: a.createdAt ? new Date(a.createdAt).toISOString() : a.date + 'T00:00:00.000Z',
+      total_appointments: 0, last_visit: null,
+    };
+    p.full_name = a.patientName; // latest name wins
+    p.total_appointments += 1;
+    if (!p.last_visit || a.date > p.last_visit) p.last_visit = a.date;
+    byPhone.set(a.phone, p);
+  }
+  return [...byPhone.values()].sort((x, y) => (x.created_at < y.created_at ? 1 : -1));
+}
+
+// ---------- Dashboard: appointments (with filters) ----------
+// GET /admin/appointments?status=Confirmed&source=chatbot&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&doctorId=D101&q=ravi&limit=500
+app.get('/admin/appointments', ah(async (req, res) => {
+  const { status, source, dateFrom, dateTo, doctorId, q } = req.query;
+  const filter = {};
+  if (dateFrom && !isValidDate(dateFrom)) return fail(res, 400, 'INVALID_DATE', 'dateFrom YYYY-MM-DD format la venum');
+  if (dateTo && !isValidDate(dateTo)) return fail(res, 400, 'INVALID_DATE', 'dateTo YYYY-MM-DD format la venum');
+  if (dateFrom || dateTo) {
+    filter.date = {};
+    if (dateFrom) filter.date.$gte = dateFrom;
+    if (dateTo) filter.date.$lte = dateTo;
+  }
+  if (doctorId) filter.doctorId = String(doctorId);
+  if (source && source !== 'All') filter.source = String(source);
+
+  const dm = await doctorMap();
+  const limit = Math.min(Number(req.query.limit) || 1000, 5000);
+  const all = await Appointment.find(filter).sort({ date: -1, slot: -1 }).limit(limit).lean();
+  let rows = all.map((a) => adminRow(a, dm));
+  if (status && status !== 'All') rows = rows.filter((r) => r.status === status);
+  if (q) {
+    const needle = String(q).toLowerCase();
+    rows = rows.filter((r) =>
+      (r.patientsdetails.full_name || '').toLowerCase().includes(needle) ||
+      (r.patientsdetails.phone || '').includes(needle) ||
+      (r.doctors && r.doctors.full_name.toLowerCase().includes(needle)) ||
+      (r.departments && r.departments.name.toLowerCase().includes(needle)) ||
+      r.id.toLowerCase().includes(needle));
+  }
+  res.json({ success: true, count: rows.length, appointments: rows });
+}));
+
+// ---------- Dashboard: doctors list ----------
+// GET /admin/doctors
+app.get('/admin/doctors', ah(async (req, res) => {
+  const docs = await Doctor.find().sort({ name: 1 }).lean();
+  res.json({
+    success: true,
+    count: docs.length,
+    doctors: docs.map((d) => ({
+      id: d._id,
+      full_name: d.name,
+      qualification: d.qualification || '',
+      experience_years: d.experienceYears || 0,
+      consultation_fee: d.consultationFee || 0,
+      phone: d.phone || '',
+      email: d.email || '',
+      is_available: d.isAvailable !== false,
+      departments: { name: d.specialization, icon: DEPT_ICONS[d.specialization] || '🏥' },
+    })),
+  });
+}));
+
+// ---------- Dashboard: patients (derived from appointments) ----------
+// GET /admin/patients?q=ravi
+app.get('/admin/patients', ah(async (req, res) => {
+  const all = await Appointment.find().lean();
+  let patients = buildPatients(all);
+  if (req.query.q) {
+    const needle = String(req.query.q).toLowerCase();
+    patients = patients.filter((p) => p.full_name.toLowerCase().includes(needle) || p.phone.includes(needle));
+  }
+  res.json({ success: true, count: patients.length, patients });
+}));
+
+// ---------- Dashboard: billing (derived: fee of each appointment) ----------
+// Completed -> Paid, upcoming (Confirmed / Rescheduled) -> Pending, Cancelled -> not billed
+// GET /admin/billing
+app.get('/admin/billing', ah(async (req, res) => {
+  const dm = await doctorMap();
+  const all = await Appointment.find().sort({ date: -1, slot: -1 }).limit(5000).lean();
+  const records = [];
+  for (const a of all) {
+    const st = uiStatus(a);
+    if (st === 'Cancelled') continue;
+    const d = dm.get(a.doctorId);
+    records.push({
+      id: 'INV-' + formatId(a.seq),
+      amount: d ? d.consultationFee || 0 : 0,
+      status: st === 'Completed' ? 'Paid' : 'Pending',
+      payment_method: null,
+      created_at: new Date(a.date + 'T' + a.slot + ':00+05:30').toISOString(),
+      patientsdetails: { full_name: a.patientName, phone: a.phone },
+      appointmentsdetails: { appointment_date: a.date, doctors: d ? { full_name: d.name } : null },
+    });
+  }
+  res.json({ success: true, count: records.length, records });
+}));
+
+// ---------- Dashboard: summary numbers ----------
+// GET /admin/stats
+app.get('/admin/stats', ah(async (req, res) => {
+  const dm = await doctorMap();
+  const all = await Appointment.find().lean();
+  const byStatus = { Pending: 0, Confirmed: 0, Completed: 0, Cancelled: 0, Rescheduled: 0 };
+  const bySource = {};
+  const byDepartment = {};
+  let revenue = 0;
+  for (const a of all) {
+    const st = uiStatus(a);
+    byStatus[st] += 1;
+    const src = a.source || 'chatbot';
+    bySource[src] = (bySource[src] || 0) + 1;
+    const d = dm.get(a.doctorId);
+    const dept = d ? d.specialization : 'Unknown';
+    byDepartment[dept] = (byDepartment[dept] || 0) + 1;
+    if (st === 'Completed' && d) revenue += d.consultationFee || 0;
+  }
+  const patients = buildPatients(all);
+  const doctors = [...dm.values()];
+  res.json({
+    success: true,
+    today: todayStr(),
+    totalPatients: patients.length,
+    totalAppointments: all.length,
+    completedAppointments: byStatus.Completed,
+    totalRevenue: revenue,
+    totalDoctors: doctors.length,
+    availableDoctors: doctors.filter((d) => d.isAvailable !== false).length,
+    byStatus,
+    bySource,
+    byDepartment,
+    recentPatients: patients.slice(0, 5),
   });
 }));
 

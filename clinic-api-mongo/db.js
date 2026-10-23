@@ -8,6 +8,12 @@ const doctorSchema = new Schema({
   _id: { type: String, required: true }, // example: D101
   name: { type: String, required: true },
   specialization: { type: String, required: true },
+  qualification: { type: String, default: 'MBBS' },
+  experienceYears: { type: Number, default: 5 },
+  consultationFee: { type: Number, default: 500 },
+  phone: String,
+  email: String,
+  isAvailable: { type: Boolean, default: true },
 });
 
 // Weekly working hours. dayOfWeek: 0 = Sunday ... 6 = Saturday
@@ -38,6 +44,7 @@ const appointmentSchema = new Schema(
     status: { type: String, enum: ['BOOKED', 'RESCHEDULED', 'CANCELLED'], default: 'BOOKED' },
     active: { type: Boolean, default: true }, // false once cancelled
     cancelReason: String,
+    source: { type: String, enum: ['chatbot', 'dashboard', 'phone'], default: 'chatbot' }, // where the booking came from
   },
   { timestamps: true }
 );
@@ -69,8 +76,32 @@ async function nextSeq() {
 }
 
 // ---------- Seed (runs only when doctors collection is empty) ----------
+// Extra doctor profile info used by the dashboard
+const DOCTOR_PROFILES = {
+  D101: { qualification: 'MD, DM (Cardiology)', experienceYears: 15, consultationFee: 800, phone: '9840011101', email: 'ramesh@clinic.com' },
+  D102: { qualification: 'MD, DNB (Cardiology)', experienceYears: 10, consultationFee: 700, phone: '9840011102', email: 'priya@clinic.com' },
+  D103: { qualification: 'MBBS, MD (General Medicine)', experienceYears: 12, consultationFee: 400, phone: '9840011103', email: 'karthik@clinic.com' },
+  D104: { qualification: 'MBBS, DCH (Pediatrics)', experienceYears: 8, consultationFee: 500, phone: '9840011104', email: 'meena@clinic.com' },
+  D105: { qualification: 'MD (Dermatology)', experienceYears: 9, consultationFee: 600, phone: '9840011105', email: 'suresh@clinic.com' },
+};
+
+// Fills profile fields on existing doctors (only where missing), so old databases get upgraded safely
+async function upgradeDoctorProfiles() {
+  for (const [id, p] of Object.entries(DOCTOR_PROFILES)) {
+    const d = await Doctor.findById(id).lean();
+    if (!d) continue;
+    const patch = {};
+    for (const [k, v] of Object.entries(p)) if (d[k] === undefined || d[k] === null) patch[k] = v;
+    if (d.isAvailable === undefined) patch.isAvailable = true;
+    if (Object.keys(patch).length) await Doctor.updateOne({ _id: id }, { $set: patch });
+  }
+}
+
 async function seed() {
-  if ((await Doctor.countDocuments()) > 0) return;
+  if ((await Doctor.countDocuments()) > 0) {
+    await upgradeDoctorProfiles();
+    return;
+  }
 
   await Doctor.insertMany([
     { _id: 'D101', name: 'Dr. Ramesh', specialization: 'Cardiology' },
@@ -101,6 +132,7 @@ async function seed() {
 
   // Sample leave: Dr. Ramesh on 2026-10-14 (Wednesday)
   await Leave.create({ doctorId: 'D101', date: '2026-10-14', reason: 'Conference' });
+  await upgradeDoctorProfiles();
   console.log('Sample doctors, schedules and leave inserted');
 }
 
