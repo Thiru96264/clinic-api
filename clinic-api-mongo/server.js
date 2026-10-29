@@ -183,6 +183,21 @@ app.get('/appointments/:id', ah(async (req, res) => {
   res.json({ success: true, appointment: await present(a) });
 }));
 
+// ---------- Details by ID only ----------
+// GET /appointments/:id/details      (no phone needed)
+app.get('/appointments/:id/details', ah(async (req, res) => {
+  const seq = parseSeq(req.params.id);
+  if (!seq) return fail(res, 400, 'INVALID_ID', 'Appointment ID format thappu (example: APT1001)');
+
+  const a = await Appointment.findOne({ seq }).lean();
+  if (!a) return fail(res, 404, 'NOT_FOUND', 'Intha ID-ku appointment illa');
+
+  const full = await present(a);
+  // mask the phone so only the last 4 digits are shown (XXXXXX1234)
+  full.phone = 'XXXXXX' + String(full.phone).slice(-4);
+  res.json({ success: true, appointment: full });
+}));
+
 // ---------- Cancel ----------
 // POST /appointments/:id/cancel   body: { phone, reason }
 app.post('/appointments/:id/cancel', ah(async (req, res) => {
