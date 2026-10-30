@@ -194,7 +194,6 @@ app.get('/appointments/:id/details', ah(async (req, res) => {
 
   const full = await present(a);
   // mask the phone so only the last 4 digits are shown (XXXXXX1234)
-  full.phone = 'XXXXXX' + String(full.phone).slice(-4);
   res.json({ success: true, appointment: full });
 }));
 
